@@ -5,6 +5,8 @@ interface Env {
   OCR_SPACE_ENDPOINT: string;
   OCR_API_KEY_1?: string;
   OCR_API_KEY_2?: string;
+  OCR_RELAY_URL?: string;
+  OCR_RELAY_TOKEN?: string;
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_MODEL?: string;
   AUTH_SUPABASE_A_URL?: string;
@@ -73,10 +75,6 @@ function corsHeaders(request: Request, env: Env): HeadersInit {
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token',
     'Access-Control-Max-Age': '600',
   };
-}
-
-function cleanHeaderName(name: string): boolean {
-  return !['origin', 'referer', 'forwarded', 'x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 'user-agent'].includes(name.toLowerCase());
 }
 
 function getClientFingerprint(request: Request): string {
@@ -200,9 +198,27 @@ async function verifySupabaseToken(request: Request, env: Env): Promise<{ ok: bo
   }
 }
 
-function isSameOriginRequest(request: Request, url: URL): boolean {
-  const origin = request.headers.get('Origin');
-  return Boolean(origin && origin === url.origin);
+type OcrSlot = {
+  id: string;
+  kind: 'cloudflare' | 'vercel';
+  key?: string;
+};
+
+function getOcrSlots(env: Env): OcrSlot[] {
+  const slots: OcrSlot[] = [];
+  const firstKey = (env.OCR_API_KEY_1 || '').trim();
+  if (firstKey) slots.push({ id: 'ocr-1-cloudflare', kind: 'cloudflare', key: firstKey });
+
+  const relayUrl = (env.OCR_RELAY_URL || '').trim();
+  const relayToken = (env.OCR_RELAY_TOKEN || '').trim();
+  if (relayUrl && relayToken) {
+    slots.push({ id: 'ocr-2-vercel', kind: 'vercel' });
+  } else if (!relayUrl) {
+    // Backward-compatible mode: use a second direct key only when no relay URL is configured.
+    const secondKey = (env.OCR_API_KEY_2 || '').trim();
+    if (secondKey) slots.push({ id: 'ocr-2-cloudflare', kind: 'cloudflare', key: secondKey });
+  }
+  return slots;
 }
 
 async function callOcrSpace(imageBase64: string, language: string, apiKey: string, env: Env): Promise<{ text: string; raw: any }> {
@@ -228,6 +244,32 @@ async function callOcrSpace(imageBase64: string, language: string, apiKey: strin
   const text = extractOcrText(payload);
   if (!text) throw new Error('لم يتم التعرف على نص واضح في الصورة');
   return { text, raw: payload };
+}
+
+async function callOcrRelay(imageBase64: string, language: string, requestId: string, env: Env): Promise<{ text: string }> {
+  const relayUrl = (env.OCR_RELAY_URL || '').trim();
+  const relayToken = (env.OCR_RELAY_TOKEN || '').trim();
+  if (!relayUrl || !relayToken) throw new Error('مسار Vercel غير مهيأ');
+
+  const response = await fetch(relayUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-C-OCR-Relay-Token': relayToken,
+    },
+    body: JSON.stringify({ imageBase64, language, request_id: requestId }),
+  });
+  const payload = await response.json().catch(() => ({})) as Record<string, any>;
+  if (!response.ok || payload?.success === false) throw new Error('فشل مسار Vercel الثانوي');
+  const text = sanitizeText(payload?.extracted_text || payload?.text, 40_000);
+  if (!text) throw new Error('لم يُرجع مسار Vercel نصًا واضحًا');
+  return { text };
+}
+
+async function callOcrSlot(slot: OcrSlot, imageBase64: string, language: string, requestId: string, env: Env): Promise<{ text: string }> {
+  if (slot.kind === 'vercel') return callOcrRelay(imageBase64, language, requestId, env);
+  const result = await callOcrSpace(imageBase64, language, slot.key || '', env);
+  return { text: result.text };
 }
 
 function parseJsonContent(content: string): any | null {
@@ -286,14 +328,13 @@ async function compareWithDeepSeek(extracted: string, question: string, modelAns
   };
 }
 
-async function processOcr(request: Request, env: Env, url: URL): Promise<Response> {
+async function processOcr(request: Request, env: Env): Promise<Response> {
   const startedAt = Date.now();
   const requestOrigin = request.headers.get('Origin')?.replace(/\/$/, '') || '';
   const cors = corsHeaders(request, env);
-  const fingerprint = getClientFingerprint(request);
   const requestId = `cocr_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`;
 
-  if (requestOrigin && !getAllowedOrigins(env).includes(requestOrigin) && !isSameOriginRequest(request, url)) {
+  if (requestOrigin && !getAllowedOrigins(env).includes(requestOrigin)) {
     return json({ success: false, request_id: requestId, failure_stage: 'authentication', error: 'مصدر الطلب غير مسموح.' }, 403, cors);
   }
 
@@ -303,8 +344,7 @@ async function processOcr(request: Request, env: Env, url: URL): Promise<Respons
   }
 
   const auth = await verifySupabaseToken(request, env);
-  const canUseSameOrigin = isSameOriginRequest(request, url);
-  if (!auth.ok && !canUseSameOrigin) {
+  if (!auth.ok) {
     addActivity({ request_id: requestId, provider_slot: 'none', success: false, failure_stage: 'authentication', error: 'جلسة المستخدم غير صالحة', duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
     return json({ success: false, request_id: requestId, failure_stage: 'authentication', error: 'يجب تسجيل الدخول قبل إرسال صورة OCR.' }, 401, cors);
   }
@@ -323,30 +363,31 @@ async function processOcr(request: Request, env: Env, url: URL): Promise<Respons
   if (!imageBase64) return json({ success: false, request_id: requestId, failure_stage: 'validation', error: 'صورة الإجابة مطلوبة.' }, 400, cors);
   if (imageBase64.length > 12_000_000) return json({ success: false, request_id: requestId, failure_stage: 'validation', error: 'حجم الصورة أكبر من الحد المسموح.' }, 413, cors);
 
-  const keys = [env.OCR_API_KEY_1, env.OCR_API_KEY_2].map((key) => (key || '').trim()).filter(Boolean);
-  if (!keys.length) {
-    addActivity({ request_id: requestId, provider_slot: 'none', success: false, failure_stage: 'configuration', error: 'لم يتم ضبط مفاتيح OCR', duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
-    return json({ success: false, request_id: requestId, failure_stage: 'configuration', error: 'لم يتم إعداد مفاتيح OCR في موقع C.' }, 503, cors);
+  const slots = getOcrSlots(env);
+  if (!slots.length) {
+    addActivity({ request_id: requestId, provider_slot: 'none', success: false, failure_stage: 'configuration', error: 'لم يتم ضبط مسارات OCR', duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
+    return json({ success: false, request_id: requestId, failure_stage: 'configuration', error: 'لم يتم إعداد مسار OCR في موقع C.' }, 503, cors);
   }
 
-  const startIndex = roundRobinCursor % keys.length;
-  roundRobinCursor = (roundRobinCursor + 1) % keys.length;
+  const startIndex = roundRobinCursor % slots.length;
+  roundRobinCursor = (roundRobinCursor + 1) % slots.length;
   let extracted = '';
-  let usedSlot = 'ocr-1';
+  let usedSlot = slots[0].id;
   let ocrError = '';
 
-  for (let offset = 0; offset < keys.length; offset += 1) {
-    const index = (startIndex + offset) % keys.length;
-    usedSlot = `ocr-${index + 1}`;
+  for (let offset = 0; offset < slots.length; offset += 1) {
+    const index = (startIndex + offset) % slots.length;
+    const slot = slots[index];
+    usedSlot = slot.id;
     try {
-      const ocr = await callOcrSpace(imageBase64, language, keys[index], env);
+      const ocr = await callOcrSlot(slot, imageBase64, language, requestId, env);
       extracted = ocr.text;
       break;
     } catch (error) {
       ocrError = error instanceof Error ? error.message : 'فشل OCR';
-      if (offset === keys.length - 1) {
+      if (offset === slots.length - 1) {
         addActivity({ request_id: requestId, provider_slot: usedSlot, success: false, failure_stage: 'ocr', error: ocrError, duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
-        return json({ success: false, request_id: requestId, provider_slot: usedSlot, failure_stage: 'ocr', error: 'فشل استخراج النص من قواعد OCR المتاحة.', attempts: keys.length }, 502, cors);
+        return json({ success: false, request_id: requestId, provider_slot: usedSlot, failure_stage: 'ocr', error: 'فشل استخراج النص من مسارات OCR المتاحة.', attempts: slots.length }, 502, cors);
       }
     }
   }
@@ -385,19 +426,25 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
 
     if (url.pathname === '/api/health') {
-      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: [env.OCR_API_KEY_1, env.OCR_API_KEY_2].filter(Boolean).length, deepseek_configured: Boolean(env.DEEPSEEK_API_KEY) }, 200, cors);
+      const slots = getOcrSlots(env);
+      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), deepseek_configured: Boolean(env.DEEPSEEK_API_KEY) }, 200, cors);
     }
 
     if (url.pathname === '/api/admin/activity' && request.method === 'GET') {
+      const auth = await verifySupabaseToken(request, env);
+      if (!auth.ok) return json({ success: false, failure_stage: 'authentication', error: 'تسجيل الدخول مطلوب.' }, 401, cors);
       return json({ success: true, activity: activity.map((item) => ({ ...item, error: item.error?.slice(0, 300) })) }, 200, cors);
     }
 
     if (url.pathname === '/api/admin/status' && request.method === 'GET') {
-      return json({ success: true, service: 'C-OCR', configured_ocr_slots: [env.OCR_API_KEY_1, env.OCR_API_KEY_2].filter(Boolean).length, deepseek_configured: Boolean(env.DEEPSEEK_API_KEY), recent_requests: activity.length }, 200, cors);
+      const auth = await verifySupabaseToken(request, env);
+      if (!auth.ok) return json({ success: false, failure_stage: 'authentication', error: 'تسجيل الدخول مطلوب.' }, 401, cors);
+      const slots = getOcrSlots(env);
+      return json({ success: true, service: 'C-OCR', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), deepseek_configured: Boolean(env.DEEPSEEK_API_KEY), recent_requests: activity.length }, 200, cors);
     }
 
     if ((url.pathname === '/api/v1/ocr/process' || url.pathname === '/api/ocr/process') && request.method === 'POST') {
-      return processOcr(request, env, url);
+      return processOcr(request, env);
     }
 
     if (url.pathname.startsWith('/api/')) return json({ success: false, error: 'المسار غير موجود.' }, 404, cors);

@@ -114,13 +114,15 @@ export default async function handler(req, res) {
       provider_slot: 'ocr-2-vercel',
       extracted_text: extractedText,
     });
-  } catch {
+  } catch (error) {
+    const failureReason = error instanceof Error ? error.message : 'OCR provider request failed';
     return sendJson(res, 502, {
       success: false,
       request_id: requestId,
       provider_slot: 'ocr-2-vercel',
       failure_stage: 'ocr',
       error: 'The secondary OCR service failed.',
+      failure_reason: failureReason.slice(0, 300),
     });
   }
 }

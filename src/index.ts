@@ -124,6 +124,25 @@ function normalizeBase64(value: string): string {
   return `data:image/jpeg;base64,${trimmed}`;
 }
 
+function sanitizeOcrFailure(value: unknown): string {
+  const message = sanitizeText(value, 500);
+  const normalized = message.toLowerCase();
+  if (!message) return 'لم يُرجع مزود OCR سببًا واضحًا للفشل.';
+  if (normalized.includes('limit') || normalized.includes('quota') || normalized.includes('rate')) {
+    return 'تجاوز حد الاستخدام أو معدل الطلبات لدى مزود OCR.';
+  }
+  if (normalized.includes('key') || normalized.includes('apikey') || normalized.includes('api key') || normalized.includes('token') || normalized.includes('unauthorized') || normalized.includes('auth')) {
+    return 'رفض مزود OCR الطلب بسبب إعداد المفتاح أو صلاحيته.';
+  }
+  if (normalized.includes('timeout') || normalized.includes('network') || normalized.includes('fetch')) {
+    return 'تعذر الاتصال بمزود OCR.';
+  }
+  if (normalized.includes('readable text') || normalized.includes('no text') || normalized.includes('empty')) {
+    return 'لم يعثر مزود OCR على نص واضح في الصورة.';
+  }
+  return message;
+}
+
 function extractOcrText(payload: any): string {
   const parsed = Array.isArray(payload?.ParsedResults) ? payload.ParsedResults : [];
   return parsed
@@ -260,7 +279,7 @@ async function callOcrRelay(imageBase64: string, language: string, requestId: st
     body: JSON.stringify({ imageBase64, language, request_id: requestId }),
   });
   const payload = await response.json().catch(() => ({})) as Record<string, any>;
-  if (!response.ok || payload?.success === false) throw new Error('فشل مسار Vercel الثانوي');
+  if (!response.ok || payload?.success === false) throw new Error(sanitizeOcrFailure(payload?.failure_reason || payload?.error || 'فشل مسار Vercel الثانوي'));
   const text = sanitizeText(payload?.extracted_text || payload?.text, 40_000);
   if (!text) throw new Error('لم يُرجع مسار Vercel نصًا واضحًا');
   return { text };
@@ -373,7 +392,7 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
   roundRobinCursor = (roundRobinCursor + 1) % slots.length;
   let extracted = '';
   let usedSlot = slots[0].id;
-  let ocrError = '';
+  const ocrFailures: Array<{ provider_slot: string; reason: string }> = [];
 
   for (let offset = 0; offset < slots.length; offset += 1) {
     const index = (startIndex + offset) % slots.length;
@@ -384,10 +403,11 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
       extracted = ocr.text;
       break;
     } catch (error) {
-      ocrError = error instanceof Error ? error.message : 'فشل OCR';
+      const reason = sanitizeOcrFailure(error instanceof Error ? error.message : 'فشل OCR');
+      ocrFailures.push({ provider_slot: usedSlot, reason });
       if (offset === slots.length - 1) {
-        addActivity({ request_id: requestId, provider_slot: usedSlot, success: false, failure_stage: 'ocr', error: ocrError, duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
-        return json({ success: false, request_id: requestId, provider_slot: usedSlot, failure_stage: 'ocr', error: 'فشل استخراج النص من مسارات OCR المتاحة.', attempts: slots.length }, 502, cors);
+        addActivity({ request_id: requestId, provider_slot: usedSlot, success: false, failure_stage: 'ocr', error: reason, duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
+        return json({ success: false, request_id: requestId, provider_slot: usedSlot, failure_stage: 'ocr', error: 'فشل استخراج النص من مسارات OCR المتاحة.', failure_reasons: ocrFailures, attempts: slots.length }, 502, cors);
       }
     }
   }

@@ -72,7 +72,7 @@ function corsHeaders(request: Request, env: Env): HeadersInit {
   return {
     ...(allowed ? { 'Access-Control-Allow-Origin': allowed, Vary: 'Origin' } : {}),
     'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token, X-Secure-File-Name',
     'Access-Control-Max-Age': '600',
   };
 }

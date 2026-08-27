@@ -50,22 +50,34 @@ function isAuthorized(req) {
 }
 
 function classifyProviderFailure(status, payload) {
-  const raw = [payload?.ErrorMessage, payload?.ErrorDetails, payload?.Message]
+  const nestedErrors = Array.isArray(payload?.ParsedResults)
+    ? payload.ParsedResults.flatMap((item) => [item?.ErrorMessage, item?.ErrorDetails])
+    : [];
+  const raw = [payload?.ErrorMessage, payload?.ErrorDetails, payload?.Message, ...nestedErrors]
     .flat()
     .filter((value) => typeof value === 'string')
     .join(' ')
+    .slice(0, 1000)
     .toLowerCase();
+  const exitCode = String(payload?.OCRExitCode ?? '').trim();
+  const pageCodes = Array.isArray(payload?.ParsedResults)
+    ? payload.ParsedResults.map((item) => String(item?.FileParseExitCode ?? '')).join(' ')
+    : '';
 
   if (!process.env.OCR_API_KEY_2) return 'provider_configuration';
-  if (status === 401 || status === 403 || raw.includes('api key') || raw.includes('apikey') || raw.includes('unauthorized') || raw.includes('forbidden') || raw.includes('authentication')) {
+  if (status === 401 || status === 403 || raw.includes('api key') || raw.includes('apikey') || raw.includes('invalid key') || raw.includes('expired key') || raw.includes('license') || raw.includes('unauthorized') || raw.includes('forbidden') || raw.includes('authentication')) {
     return 'provider_auth';
   }
-  if (status === 429 || raw.includes('quota') || raw.includes('rate limit') || raw.includes('daily limit') || raw.includes('limit exceeded')) {
+  if (status === 429 || raw.includes('quota') || raw.includes('rate limit') || raw.includes('daily limit') || raw.includes('limit exceeded') || raw.includes('too many requests') || raw.includes('maximum requests')) {
     return 'provider_quota';
   }
-  if (raw.includes('no text') || raw.includes('empty') || raw.includes('unreadable') || raw.includes('unable to recognize')) {
+  if (raw.includes('not a valid base64') || raw.includes('unable to recognize the file type') || raw.includes('invalid image') || raw.includes('unsupported image') || raw.includes('corrupt') || raw.includes('file type') || exitCode === '99' || pageCodes.includes('-30')) {
+    return 'provider_invalid_image';
+  }
+  if (raw.includes('no text') || raw.includes('empty') || raw.includes('unreadable') || raw.includes('unable to recognize') || exitCode === '3') {
     return 'provider_empty_text';
   }
+  if (exitCode === '4' || pageCodes.includes('-20')) return 'provider_processing';
   if (!status || status < 200 || status >= 300) return 'provider_http';
   return 'provider_processing';
 }

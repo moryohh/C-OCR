@@ -178,8 +178,11 @@ function sanitizeOcrFailure(value: unknown): string {
   if (message.includes('provider_network') || message.includes('timeout')) {
     return 'تعذر الاتصال بمزود OCR.';
   }
+  if (message.includes('provider_invalid_image')) {
+    return 'الصورة المرسلة غير صالحة للقراءة لدى مزود OCR.';
+  }
   if (message.includes('provider_empty_text') || message.includes('provider_processing_empty') || message.includes('no_text')) {
-    return 'لم يعثر مزود OCR على نص واضح في الصورة.';
+    return 'لم يتمكن مزود OCR من قراءة نص واضح في الصورة.';
   }
   if (message.includes('provider_http') || message.includes('provider_processing')) {
     return 'رفض مزود OCR معالجة الصورة.';
@@ -285,20 +288,32 @@ function getOcrSlots(env: Env): OcrSlot[] {
 }
 
 function classifyOcrProviderFailure(status: number, payload: Record<string, any>): string {
+  const nestedErrors = Array.isArray(payload?.ParsedResults)
+    ? payload.ParsedResults.flatMap((item: any) => [item?.ErrorMessage, item?.ErrorDetails])
+    : [];
   const raw = sanitizeText([
     payload?.ErrorMessage,
     payload?.ErrorDetails,
     payload?.Message,
-  ].flat().join(' '), 500).toLowerCase();
-  if (status === 401 || status === 403 || raw.includes('api key') || raw.includes('apikey') || raw.includes('unauthorized') || raw.includes('forbidden') || raw.includes('authentication')) {
+    ...nestedErrors,
+  ].flat().join(' '), 1000).toLowerCase();
+  const exitCode = String(payload?.OCRExitCode ?? '').trim();
+  const pageCodes = Array.isArray(payload?.ParsedResults)
+    ? payload.ParsedResults.map((item: any) => String(item?.FileParseExitCode ?? '')).join(' ')
+    : '';
+  if (status === 401 || status === 403 || raw.includes('api key') || raw.includes('apikey') || raw.includes('invalid key') || raw.includes('expired key') || raw.includes('license') || raw.includes('unauthorized') || raw.includes('forbidden') || raw.includes('authentication')) {
     return 'provider_auth';
   }
-  if (status === 429 || raw.includes('quota') || raw.includes('rate limit') || raw.includes('daily limit') || raw.includes('limit exceeded')) {
+  if (status === 429 || raw.includes('quota') || raw.includes('rate limit') || raw.includes('daily limit') || raw.includes('limit exceeded') || raw.includes('too many requests') || raw.includes('maximum requests')) {
     return 'provider_quota';
   }
-  if (raw.includes('no text') || raw.includes('empty') || raw.includes('unreadable') || raw.includes('unable to recognize')) {
+  if (raw.includes('not a valid base64') || raw.includes('unable to recognize the file type') || raw.includes('invalid image') || raw.includes('unsupported image') || raw.includes('corrupt') || raw.includes('file type') || exitCode === '99' || pageCodes.includes('-30')) {
+    return 'provider_invalid_image';
+  }
+  if (raw.includes('no text') || raw.includes('empty') || raw.includes('unreadable') || raw.includes('unable to recognize') || exitCode === '3') {
     return 'provider_empty_text';
   }
+  if (exitCode === '4' || pageCodes.includes('-20')) return 'provider_processing';
   if (!status || status < 200 || status >= 300) return 'provider_http';
   return 'provider_processing';
 }

@@ -1,0 +1,14 @@
+name = "c-ocr-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-08-27"
+workers_dev = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[vars]
+OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
+ALLOWED_ORIGINS = "https://moryohh.github.io,https://moryohh.github.io/A"
+OCR_DAILY_LIMIT = "500"

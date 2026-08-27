@@ -323,6 +323,9 @@ async function callOcrSpace(imageBase64: string, language: string, apiKey: strin
   form.append('base64Image', normalizeBase64(imageBase64));
   form.append('language', language || 'ara');
   form.append('OCREngine', '2');
+  form.append('filetype', 'JPG');
+  form.append('detectOrientation', 'true');
+  form.append('scale', 'true');
   form.append('isOverlayRequired', 'false');
 
   // The Worker creates a fresh server-to-server request; no browser identity headers are forwarded.

@@ -89,7 +89,7 @@ async function callOcrSpace(imageBase64, language) {
   const form = new FormData();
   form.append('base64Image', normalizeBase64(imageBase64));
   form.append('language', cleanString(language, 10) || 'ara');
-  form.append('OCREngine', '2');
+  form.append('OCREngine', '3');
   form.append('filetype', 'JPG');
   form.append('detectOrientation', 'true');
   form.append('scale', 'true');

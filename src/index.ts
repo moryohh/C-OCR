@@ -155,22 +155,36 @@ function normalizeBase64(value: string): string {
 }
 
 function sanitizeOcrFailure(value: unknown): string {
-  const message = sanitizeText(value, 500);
-  const normalized = message.toLowerCase();
+  const message = sanitizeText(value, 120).toLowerCase();
   if (!message) return 'لم يُرجع مزود OCR سببًا واضحًا للفشل.';
-  if (normalized.includes('limit') || normalized.includes('quota') || normalized.includes('rate')) {
+  if (message.includes('relay_auth')) {
+    return 'تعذر التحقق من اتصال مسار Vercel الاحتياطي.';
+  }
+  if (message.includes('relay_payload_too_large')) {
+    return 'حجم الصورة أكبر من الحد الذي يقبله مسار Vercel الاحتياطي.';
+  }
+  if (message.includes('relay_quota')) {
+    return 'تجاوز مسار Vercel أو مزود OCR حد الاستخدام.';
+  }
+  if (message.includes('relay_network')) {
+    return 'تعذر الاتصال بمسار Vercel الاحتياطي.';
+  }
+  if (message.includes('provider_quota') || message.includes('ocr_quota') || message.includes('rate_limit')) {
     return 'تجاوز حد الاستخدام أو معدل الطلبات لدى مزود OCR.';
   }
-  if (normalized.includes('key') || normalized.includes('apikey') || normalized.includes('api key') || normalized.includes('token') || normalized.includes('unauthorized') || normalized.includes('auth')) {
+  if (message.includes('provider_auth') || message.includes('provider_key') || message.includes('provider_configuration')) {
     return 'رفض مزود OCR الطلب بسبب إعداد المفتاح أو صلاحيته.';
   }
-  if (normalized.includes('timeout') || normalized.includes('network') || normalized.includes('fetch')) {
+  if (message.includes('provider_network') || message.includes('timeout')) {
     return 'تعذر الاتصال بمزود OCR.';
   }
-  if (normalized.includes('readable text') || normalized.includes('no text') || normalized.includes('empty')) {
+  if (message.includes('provider_empty_text') || message.includes('provider_processing_empty') || message.includes('no_text')) {
     return 'لم يعثر مزود OCR على نص واضح في الصورة.';
   }
-  return message;
+  if (message.includes('provider_http') || message.includes('provider_processing')) {
+    return 'رفض مزود OCR معالجة الصورة.';
+  }
+  return 'فشل مزود OCR في معالجة الصورة دون إظهار تفاصيل حساسة.';
 }
 
 function extractOcrText(payload: any): string {
@@ -270,6 +284,25 @@ function getOcrSlots(env: Env): OcrSlot[] {
   return slots;
 }
 
+function classifyOcrProviderFailure(status: number, payload: Record<string, any>): string {
+  const raw = sanitizeText([
+    payload?.ErrorMessage,
+    payload?.ErrorDetails,
+    payload?.Message,
+  ].flat().join(' '), 500).toLowerCase();
+  if (status === 401 || status === 403 || raw.includes('api key') || raw.includes('apikey') || raw.includes('unauthorized') || raw.includes('forbidden') || raw.includes('authentication')) {
+    return 'provider_auth';
+  }
+  if (status === 429 || raw.includes('quota') || raw.includes('rate limit') || raw.includes('daily limit') || raw.includes('limit exceeded')) {
+    return 'provider_quota';
+  }
+  if (raw.includes('no text') || raw.includes('empty') || raw.includes('unreadable') || raw.includes('unable to recognize')) {
+    return 'provider_empty_text';
+  }
+  if (!status || status < 200 || status >= 300) return 'provider_http';
+  return 'provider_processing';
+}
+
 async function callOcrSpace(imageBase64: string, language: string, apiKey: string, env: Env): Promise<{ text: string; raw: any }> {
   const form = new FormData();
   form.append('base64Image', normalizeBase64(imageBase64));
@@ -279,19 +312,22 @@ async function callOcrSpace(imageBase64: string, language: string, apiKey: strin
 
   // The Worker creates a fresh server-to-server request; no browser identity headers are forwarded.
   const headers = new Headers({ apikey: apiKey });
-
-  const response = await fetch(env.OCR_SPACE_ENDPOINT || 'https://api.ocr.space/parse/image', {
-    method: 'POST',
-    headers,
-    body: form,
-  });
+  let response: Response;
+  try {
+    response = await fetch(env.OCR_SPACE_ENDPOINT || 'https://api.ocr.space/parse/image', {
+      method: 'POST',
+      headers,
+      body: form,
+    });
+  } catch {
+    throw new Error('provider_network');
+  }
   const payload = await response.json().catch(() => ({})) as Record<string, any>;
   if (!response.ok || payload.IsErroredOnProcessing || payload.OCRExitCode === '3' || payload.OCRExitCode === 4) {
-    const reason = sanitizeText(payload?.ErrorMessage || payload?.ErrorDetails || `OCR HTTP ${response.status}`, 500);
-    throw new Error(reason || 'فشل استخراج النص من OCR.Space');
+    throw new Error(classifyOcrProviderFailure(response.status, payload));
   }
   const text = extractOcrText(payload);
-  if (!text) throw new Error('لم يتم التعرف على نص واضح في الصورة');
+  if (!text) throw new Error('provider_empty_text');
   return { text, raw: payload };
 }
 
@@ -309,9 +345,14 @@ async function callOcrRelay(imageBase64: string, language: string, requestId: st
     body: JSON.stringify({ imageBase64, language, request_id: requestId }),
   });
   const payload = await response.json().catch(() => ({})) as Record<string, any>;
-  if (!response.ok || payload?.success === false) throw new Error(sanitizeOcrFailure(payload?.failure_reason || payload?.error || 'فشل مسار Vercel الثانوي'));
+  if (!response.ok || payload?.success === false) {
+    if (response.status === 401 || response.status === 403) throw new Error('relay_auth');
+    if (response.status === 413) throw new Error('relay_payload_too_large');
+    if (response.status === 429) throw new Error('relay_quota');
+    throw new Error(sanitizeOcrFailure(payload?.failure_reason || payload?.error || 'فشل مسار Vercel الثانوي'));
+  }
   const text = sanitizeText(payload?.extracted_text || payload?.text, 40_000);
-  if (!text) throw new Error('لم يُرجع مسار Vercel نصًا واضحًا');
+  if (!text) throw new Error('provider_empty_text');
   return { text };
 }
 

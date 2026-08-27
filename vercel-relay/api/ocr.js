@@ -49,9 +49,30 @@ function isAuthorized(req) {
   return Boolean(expected && supplied && safeTokenEqual(expected, supplied));
 }
 
+function classifyProviderFailure(status, payload) {
+  const raw = [payload?.ErrorMessage, payload?.ErrorDetails, payload?.Message]
+    .flat()
+    .filter((value) => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
+
+  if (!process.env.OCR_API_KEY_2) return 'provider_configuration';
+  if (status === 401 || status === 403 || raw.includes('api key') || raw.includes('apikey') || raw.includes('unauthorized') || raw.includes('forbidden') || raw.includes('authentication')) {
+    return 'provider_auth';
+  }
+  if (status === 429 || raw.includes('quota') || raw.includes('rate limit') || raw.includes('daily limit') || raw.includes('limit exceeded')) {
+    return 'provider_quota';
+  }
+  if (raw.includes('no text') || raw.includes('empty') || raw.includes('unreadable') || raw.includes('unable to recognize')) {
+    return 'provider_empty_text';
+  }
+  if (!status || status < 200 || status >= 300) return 'provider_http';
+  return 'provider_processing';
+}
+
 async function callOcrSpace(imageBase64, language) {
   const apiKey = cleanString(process.env.OCR_API_KEY_2, 512);
-  if (!apiKey) throw new Error('OCR relay is not configured');
+  if (!apiKey) throw new Error('provider_configuration');
 
   const form = new FormData();
   form.append('base64Image', normalizeBase64(imageBase64));
@@ -59,19 +80,24 @@ async function callOcrSpace(imageBase64, language) {
   form.append('OCREngine', '2');
   form.append('isOverlayRequired', 'false');
 
-  const response = await fetch(process.env.OCR_SPACE_ENDPOINT || DEFAULT_OCR_ENDPOINT, {
-    method: 'POST',
-    headers: { apikey: apiKey },
-    body: form,
-  });
+  let response;
+  try {
+    response = await fetch(process.env.OCR_SPACE_ENDPOINT || DEFAULT_OCR_ENDPOINT, {
+      method: 'POST',
+      headers: { apikey: apiKey },
+      body: form,
+    });
+  } catch {
+    throw new Error('provider_network');
+  }
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok || payload?.IsErroredOnProcessing || payload?.OCRExitCode === '3' || payload?.OCRExitCode === 4) {
-    throw new Error('OCR provider request failed');
+    throw new Error(classifyProviderFailure(response.status, payload));
   }
 
   const extractedText = extractOcrText(payload);
-  if (!extractedText) throw new Error('No readable text was found');
+  if (!extractedText) throw new Error('provider_empty_text');
   return extractedText;
 }
 
@@ -94,7 +120,12 @@ export default async function handler(req, res) {
     return sendJson(res, 401, { success: false, failure_stage: 'authentication', error: 'Unauthorized relay request.' });
   }
 
-  const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
+  let body;
+  try {
+    body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
+  } catch {
+    return sendJson(res, 400, { success: false, failure_stage: 'validation', error: 'Invalid JSON request.' });
+  }
   const imageBase64 = cleanString(body.imageBase64 || body.image_base64 || body.base64Image, MAX_IMAGE_LENGTH);
   const language = cleanString(body.language, 10) || 'ara';
   const requestId = cleanString(body.request_id, 160);

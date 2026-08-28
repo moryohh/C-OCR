@@ -13,6 +13,8 @@ interface Env {
   AUTH_SUPABASE_A_ANON_KEY?: string;
   ALLOWED_ORIGINS?: string;
   OCR_DAILY_LIMIT?: string;
+  GUEST_TEST_ENABLED?: string;
+  GUEST_TEST_DAILY_LIMIT?: string;
 }
 
 type FailureStage = 'validation' | 'authentication' | 'proxy' | 'ocr' | 'deepseek' | 'comparison' | 'configuration';
@@ -44,7 +46,10 @@ let roundRobinCursor = 0;
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 let jwksIssuer = '';
 const ipBuckets = new Map<string, { startedAt: number; count: number }>();
+const guestBuckets = new Map<string, { startedAt: number; count: number }>();
 const DAILY_LIMIT_DEFAULT = 500;
+const GUEST_TEST_DAILY_LIMIT_DEFAULT = 5;
+const GUEST_TEST_WINDOW_MS = 24 * 60 * 60_000;
 const WINDOW_MS = 60_000;
 const WINDOW_LIMIT = 20;
 
@@ -85,6 +90,31 @@ function getClientFingerprint(request: Request): string {
     hash = Math.imul(hash, 16777619);
   }
   return `ip_${(hash >>> 0).toString(16)}`;
+}
+
+function isGuestTestEnabled(env: Env): boolean {
+  return ['1', 'true', 'yes'].includes((env.GUEST_TEST_ENABLED || '').trim().toLowerCase());
+}
+
+function isGuestRateLimited(request: Request, env: Env): { limited: boolean; retryAfter: number } {
+  const now = Date.now();
+  const fingerprint = getClientFingerprint(request);
+  const current = guestBuckets.get(fingerprint);
+  const bucket = !current || now - current.startedAt >= GUEST_TEST_WINDOW_MS
+    ? { startedAt: now, count: 0 }
+    : current;
+  bucket.count += 1;
+  guestBuckets.set(fingerprint, bucket);
+
+  if (guestBuckets.size > 5000) {
+    for (const [key, value] of guestBuckets) {
+      if (now - value.startedAt >= GUEST_TEST_WINDOW_MS) guestBuckets.delete(key);
+    }
+  }
+
+  const dailyLimit = Math.max(1, Math.min(20, Number(env.GUEST_TEST_DAILY_LIMIT || GUEST_TEST_DAILY_LIMIT_DEFAULT)));
+  const retryAfter = Math.max(1, Math.ceil((GUEST_TEST_WINDOW_MS - (now - bucket.startedAt)) / 1000));
+  return { limited: bucket.count > dailyLimit, retryAfter };
 }
 
 function isRateLimited(request: Request, env: Env): { limited: boolean; retryAfter: number } {
@@ -426,10 +456,24 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
     return json({ success: false, request_id: requestId, failure_stage: 'validation', error: 'بيانات الطلب ليست JSON صحيحة.' }, 400, cors);
   }
 
-  const auth = await verifySupabaseToken(request, env);
-  if (!auth.ok) {
-    addActivity({ request_id: requestId, provider_slot: 'none', success: false, failure_stage: 'authentication', error: 'جلسة المستخدم غير صالحة', duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
-    return json({ success: false, request_id: requestId, failure_stage: 'authentication', error: 'يجب تسجيل الدخول قبل إرسال صورة OCR.' }, 401, cors);
+  // Temporary guest mode is deliberately separate from the normal path. It
+  // accepts only the explicit daily-exam marker, is off by default, and has a
+  // small per-IP daily limit. The normal route still requires Supabase JWT.
+  const isGuestTestRequest = body?.guest_test === true && body?.source === 'daily_exam';
+  if (isGuestTestRequest) {
+    if (!isGuestTestEnabled(env)) {
+      return json({ success: false, request_id: requestId, failure_stage: 'authentication', error: 'الوضع التجريبي غير مفعّل.' }, 403, cors);
+    }
+    const guestRate = isGuestRateLimited(request, env);
+    if (guestRate.limited) {
+      return json({ success: false, request_id: requestId, failure_stage: 'proxy', code: 'GUEST_RATE_LIMITED', error: 'تم استنفاد محاولات التجربة المؤقتة لهذا الجهاز اليوم.', retry_after_seconds: guestRate.retryAfter }, 429, { ...cors, 'Retry-After': String(guestRate.retryAfter) });
+    }
+  } else {
+    const auth = await verifySupabaseToken(request, env);
+    if (!auth.ok) {
+      addActivity({ request_id: requestId, provider_slot: 'none', success: false, failure_stage: 'authentication', error: 'جلسة المستخدم غير صالحة', duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
+      return json({ success: false, request_id: requestId, failure_stage: 'authentication', error: 'يجب تسجيل الدخول قبل إرسال صورة OCR.' }, 401, cors);
+    }
   }
 
   const imageBase64 = sanitizeText(body?.imageBase64 || body?.image_base64 || body?.base64Image, 12_000_000);
@@ -506,7 +550,7 @@ export default {
 
     if (url.pathname === '/api/health') {
       const slots = getOcrSlots(env);
-      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), deepseek_configured: Boolean(env.DEEPSEEK_API_KEY) }, 200, cors);
+      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), deepseek_configured: Boolean(env.DEEPSEEK_API_KEY), guest_test_enabled: isGuestTestEnabled(env) }, 200, cors);
     }
 
     if (url.pathname === '/api/admin/activity' && request.method === 'GET') {
@@ -519,7 +563,7 @@ export default {
       const auth = await verifySupabaseToken(request, env);
       if (!auth.ok) return json({ success: false, failure_stage: 'authentication', error: 'تسجيل الدخول مطلوب.' }, 401, cors);
       const slots = getOcrSlots(env);
-      return json({ success: true, service: 'C-OCR', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), deepseek_configured: Boolean(env.DEEPSEEK_API_KEY), recent_requests: activity.length }, 200, cors);
+      return json({ success: true, service: 'C-OCR', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), deepseek_configured: Boolean(env.DEEPSEEK_API_KEY), guest_test_enabled: isGuestTestEnabled(env), recent_requests: activity.length }, 200, cors);
     }
 
     if ((url.pathname === '/api/v1/ocr/process' || url.pathname === '/api/ocr/process') && request.method === 'POST') {

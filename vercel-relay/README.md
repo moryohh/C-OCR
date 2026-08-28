@@ -27,7 +27,7 @@ https://your-vercel-project.vercel.app/api/ocr
 X-C-OCR-Relay-Token: نفس القيمة الموجودة في C_OCR_RELAY_TOKEN
 ```
 
-الطلب يحتوي على `imageBase64` و`language` و`request_id` فقط. لا ترسل إلى Vercel الإجابة النموذجية أو بيانات DeepSeek؛ المقارنة تتم في C-OCR بعد استخراج النص.
+الطلب يحتوي على `imageBase64` و`language` و`request_id` فقط. لا ترسل إلى Vercel الإجابة النموذجية أو أي بيانات تقييم. C هو المدير الوحيد لـ`api_ocr2` ويستقبل النص المستخرج ثم يعيده إلى موقع A.
 
 ## اختبار الصحة
 

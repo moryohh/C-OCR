@@ -1,13 +1,15 @@
 # C OCR
 
-بوابة مستقلة لمعالجة صور الإجابات من موقع A. تستقبل الطلب، تختار واحدًا من مفتاحي OCR.Space بالتناوب، تنتقل إلى المفتاح الآخر عند فشل OCR الحقيقي، ثم تستخدم DeepSeek لتقييم الإجابة ومقارنتها بالسؤال والإجابة النموذجية.
+بوابة مستقلة لاستخراج النص من صور الإجابات القادمة من موقع A. يدير C مسارين فقط: `api_ocr1` بمفتاح OCR الأول داخل Cloudflare، و`api_ocr2` عبر Vercel بمفتاح OCR الثاني. عند فشل المسار الأساسي ينتقل C تلقائيًا إلى المسار الآخر، ثم يعيد النص المستخرج إلى A. لا ينفذ C تقييمًا أو مقارنة أو اتصالًا بـDeepSeek.
 
 ## المسار
 
 ```text
-موقع A → C OCR Worker → OCR.Space
+موقع A → C OCR Worker على Cloudflare
+              ├─ api_ocr1 → OCR.Space بالمفتاح الأول
+              └─ api_ocr2 → Vercel Relay → OCR.Space بالمفتاح الثاني
                          ↓
-                      DeepSeek
+                 extracted_text إلى A
 ```
 
 موقع B-Community خارج هذا المشروع تمامًا.
@@ -19,7 +21,6 @@
 ```text
 OCR_API_KEY_1
 OCR_RELAY_TOKEN
-DEEPSEEK_API_KEY
 AUTH_SUPABASE_A_URL
 AUTH_SUPABASE_A_ANON_KEY
 ```
@@ -33,7 +34,7 @@ C_OCR_RELAY_TOKEN
 
 يجب أن تكون قيمة `C_OCR_RELAY_TOKEN` متطابقة في Cloudflare وVercel، لكنها لا تُكتب في GitHub أو الواجهة. لا تضف `OCR_API_KEY_2` في Cloudflare عند تفعيل مسار Vercel؛ يحتفظ بها Vercel فقط.
 
-يُستخدم `AUTH_SUPABASE_A_URL` و`AUTH_SUPABASE_A_ANON_KEY` للتحقق من توكن جلسة Supabase المرسل من موقع A. لا يُعاد أي مفتاح في استجابة API.
+تُستخدم قيم Supabase فقط لحماية واجهات الإدارة إن لزم الأمر، وليس شرطًا لطلب OCR العام القادم من A. لا يُعاد أي مفتاح في استجابة API.
 
 في Cloudflare أضف كذلك متغيرًا نصيًا غير سري باسم `OCR_RELAY_URL` وقيمته رابط Function الخاصة بـVercel:
 
@@ -44,8 +45,8 @@ https://your-vercel-project.vercel.app/api/ocr
 يمكن ضبط:
 
 ```text
-DEEPSEEK_MODEL=deepseek-chat
 OCR_DAILY_LIMIT=500
+OCR_PRIMARY_ROUTE=cloudflare
 ```
 
 ## خدمة Vercel الثانوية
@@ -71,7 +72,7 @@ CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 ```
 
-يُفضل أن يكون رمز Cloudflare محدود الصلاحية إلى Workers Scripts: Edit للحساب المحدد فقط. بعد النشر، أضف أسرار OCR وDeepSeek من Cloudflare Dashboard، وليس من ملف GitHub.
+يُفضل أن يكون رمز Cloudflare محدود الصلاحية إلى Workers Scripts: Edit للحساب المحدد فقط. بعد النشر، أضف `OCR_API_KEY_1` و`OCR_RELAY_TOKEN` من Cloudflare Dashboard، وليس من ملف GitHub.
 
 ## الواجهات
 
@@ -83,7 +84,7 @@ CLOUDFLARE_ACCOUNT_ID
 
 ## الحماية
 
-تُحذف الترويسات التي قد تعرّف موقع A قبل طلب OCR، ولا تُحفظ الصور في سجل النشاط. يُستخدم محدد طلبات مؤقت ببصمة غير قابلة للعكس بدل حفظ عنوان IP الخام. في وضع التوزيع الجديد، كل صورة تستخدم مسار Cloudflare أو مسار Vercel، ولا تتم تجربة المسار الآخر إلا عند فشل الأول. يجب عدم استخدام المسار الثانوي لإخفاء استخدام غير مصرح أو لتجاوز حدود مزود OCR.Space.
+تُحذف الترويسات التي قد تعرّف موقع A قبل طلب OCR، ولا تُحفظ الصور في سجل النشاط. يُستخدم محدد طلبات مؤقت ببصمة غير قابلة للعكس بدل حفظ عنوان IP الخام. C هو المدير الوحيد للمسارين: api_ocr1 داخل Cloudflare وapi_ocr2 عبر Vercel، ولا تتم تجربة المسار الآخر إلا عند فشل الأول. يجب عدم استخدام المسار الثانوي لتجاوز حدود مزود OCR.Space.
 
 ## ملاحظة عن الخطة المجانية
 

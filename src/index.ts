@@ -7,8 +7,6 @@ interface Env {
   OCR_API_KEY_2?: string;
   OCR_RELAY_URL?: string;
   OCR_RELAY_TOKEN?: string;
-  DEEPSEEK_API_KEY?: string;
-  DEEPSEEK_MODEL?: string;
   AUTH_SUPABASE_A_URL?: string;
   AUTH_SUPABASE_A_ANON_KEY?: string;
   ALLOWED_ORIGINS?: string;
@@ -16,7 +14,7 @@ interface Env {
   OCR_PRIMARY_ROUTE?: string;
 }
 
-type FailureStage = 'validation' | 'authentication' | 'proxy' | 'ocr' | 'deepseek' | 'comparison' | 'configuration';
+type FailureStage = 'validation' | 'authentication' | 'proxy' | 'ocr' | 'configuration';
 
 type ActivityRecord = {
   request_id: string;
@@ -26,18 +24,6 @@ type ActivityRecord = {
   error?: string;
   duration_ms: number;
   created_at: string;
-};
-
-type EvaluationResult = {
-  score: number;
-  max_score: number;
-  percentage: number;
-  feedback: string;
-  identifiedTextOrSteps: string[];
-  strengths: string[];
-  recommendations: string[];
-  comparison_engine: string;
-  extracted_text: string;
 };
 
 const activity: ActivityRecord[] = [];
@@ -168,40 +154,6 @@ function extractOcrText(payload: any): string {
     .filter(Boolean)
     .join('\n')
     .slice(0, 40_000);
-}
-
-function normalizeForCompare(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[\u064B-\u065F\u0670]/g, '')
-    .replace(/[إأآا]/g, 'ا')
-    .replace(/ة/g, 'ه')
-    .replace(/[ى]/g, 'ي')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function localComparison(extracted: string, modelAnswer: string, maxScore: number): EvaluationResult {
-  const expected = normalizeForCompare(modelAnswer);
-  const actual = normalizeForCompare(extracted);
-  const expectedTokens = new Set(expected.split(' ').filter((token) => token.length > 1));
-  const actualTokens = new Set(actual.split(' ').filter((token) => token.length > 1));
-  let matches = 0;
-  for (const token of expectedTokens) if (actualTokens.has(token)) matches += 1;
-  const percentage = expectedTokens.size ? Math.round((matches / expectedTokens.size) * 100) : 0;
-  const score = Math.round((maxScore * percentage) / 100);
-  return {
-    score,
-    max_score: maxScore,
-    percentage,
-    feedback: 'تمت المقارنة محليًا لأن خدمة DeepSeek لم تُرجع نتيجة. يمكنك إعادة المحاولة لاحقًا.',
-    identifiedTextOrSteps: extracted ? [extracted.slice(0, 2000)] : [],
-    strengths: matches > 0 ? ['تم التعرف على جزء من كلمات الإجابة النموذجية.'] : [],
-    recommendations: ['تأكد من وضوح الصورة وترتيب خطوات الإجابة.'],
-    comparison_engine: 'local-fallback',
-    extracted_text: extracted,
-  };
 }
 
 async function verifySupabaseToken(request: Request, env: Env): Promise<{ ok: boolean; userId?: string }> {
@@ -351,62 +303,6 @@ async function callOcrSlot(slot: OcrSlot, imageBase64: string, language: string,
   return { text: result.text };
 }
 
-function parseJsonContent(content: string): any | null {
-  const cleaned = content.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
-  try { return JSON.parse(cleaned); } catch { return null; }
-}
-
-async function compareWithDeepSeek(extracted: string, question: string, modelAnswer: string, maxScore: number, env: Env): Promise<EvaluationResult> {
-  const apiKey = (env.DEEPSEEK_API_KEY || '').trim();
-  if (!apiKey) throw new Error('مفتاح DeepSeek غير مهيأ في موقع C');
-
-  const prompt = [
-    'قيّم إجابة الطالب باللغة العربية وفق السؤال والإجابة النموذجية.',
-    'أعد JSON صالحًا فقط دون Markdown بهذه المفاتيح:',
-    '{"score":number,"percentage":number,"feedback":string,"identifiedTextOrSteps":string[],"strengths":string[],"recommendations":string[]}',
-    `الدرجة الكاملة: ${maxScore}`,
-    `السؤال: ${question || 'غير متوفر'}`,
-    `الإجابة النموذجية: ${modelAnswer || 'غير متوفرة'}`,
-    `النص المستخرج من ورقة الطالب: ${extracted}`,
-  ].join('\n\n');
-
-  const response = await fetch('https://api.deepseek.com/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: env.DEEPSEEK_MODEL || 'deepseek-chat',
-      temperature: 0,
-      max_tokens: 700,
-      messages: [
-        { role: 'system', content: 'أنت مصحح تعليمي دقيق. أعد JSON فقط.' },
-        { role: 'user', content: prompt },
-      ],
-    }),
-  });
-  const payload = await response.json().catch(() => ({})) as Record<string, any>;
-  if (!response.ok) throw new Error(sanitizeText(payload.error?.message || `DeepSeek HTTP ${response.status}`, 500));
-  const content = payload?.choices?.[0]?.message?.content;
-  const parsed = typeof content === 'string' ? parseJsonContent(content) : null;
-  if (!parsed) throw new Error('تعذر قراءة نتيجة DeepSeek بصيغة صحيحة');
-
-  const percentage = Math.max(0, Math.min(100, Math.round(Number(parsed.percentage) || 0)));
-  const score = Math.max(0, Math.min(maxScore, Math.round(Number(parsed.score) || (maxScore * percentage) / 100)));
-  return {
-    score,
-    max_score: maxScore,
-    percentage,
-    feedback: sanitizeText(parsed.feedback, 3000) || 'تم تقييم الإجابة.',
-    identifiedTextOrSteps: Array.isArray(parsed.identifiedTextOrSteps) ? parsed.identifiedTextOrSteps.map((item: unknown) => sanitizeText(item, 500)).filter(Boolean).slice(0, 20) : [],
-    strengths: Array.isArray(parsed.strengths) ? parsed.strengths.map((item: unknown) => sanitizeText(item, 500)).filter(Boolean).slice(0, 20) : [],
-    recommendations: Array.isArray(parsed.recommendations) ? parsed.recommendations.map((item: unknown) => sanitizeText(item, 500)).filter(Boolean).slice(0, 20) : [],
-    comparison_engine: 'deepseek',
-    extracted_text: extracted,
-  };
-}
-
 async function processOcr(request: Request, env: Env): Promise<Response> {
   const startedAt = Date.now();
   const requestOrigin = request.headers.get('Origin')?.replace(/\/$/, '') || '';
@@ -427,25 +323,13 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
     return json({ success: false, request_id: requestId, failure_stage: 'validation', error: 'بيانات الطلب ليست JSON صحيحة.' }, 400, cors);
   }
 
-  const auth = await verifySupabaseToken(request, env);
-  if (!auth.ok) {
-    const hasAuthorizationHeader = request.headers.get('Authorization')?.startsWith('Bearer ') === true;
-    const authCode = hasAuthorizationHeader ? 'AUTH_TOKEN_INVALID' : 'AUTH_TOKEN_MISSING';
-    addActivity({ request_id: requestId, provider_slot: 'none', success: false, failure_stage: 'authentication', error: authCode, duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
-    return json({
-      success: false,
-      request_id: requestId,
-      failure_stage: 'authentication',
-      code: authCode,
-      error: hasAuthorizationHeader ? 'رفض C-OCR رمز جلسة الحساب.' : 'لم يصل رمز جلسة الحساب إلى C-OCR.',
-    }, 401, cors);
+  const source = sanitizeText(body?.source, 40);
+  if (source !== 'daily_exam' && source !== 'educational_test') {
+    return json({ success: false, request_id: requestId, failure_stage: 'validation', code: 'SOURCE_NOT_ALLOWED', error: 'هذا المسار مخصص للاختبارات التعليمية فقط.' }, 403, cors);
   }
 
   const imageBase64 = sanitizeText(body?.imageBase64 || body?.image_base64 || body?.base64Image, 12_000_000);
-  const question = sanitizeText(body?.questionText || body?.question_text || body?.question, 10_000);
-  const modelAnswer = sanitizeText(body?.modelAnswer || body?.model_answer, 10_000);
   const language = sanitizeText(body?.language, 10) || 'ara';
-  const maxScore = Math.max(1, Math.min(1000, Number(body?.maxScore || body?.max_score) || 5));
 
   if (!imageBase64) return json({ success: false, request_id: requestId, failure_stage: 'validation', error: 'صورة الإجابة مطلوبة.' }, 400, cors);
   if (imageBase64.length > 12_000_000) return json({ success: false, request_id: requestId, failure_stage: 'validation', error: 'حجم الصورة أكبر من الحد المسموح.' }, 413, cors);
@@ -484,29 +368,14 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  let comparison: EvaluationResult;
-  let failureStage: FailureStage | undefined;
-  try {
-    comparison = await compareWithDeepSeek(extracted, question, modelAnswer, maxScore, env);
-  } catch (error) {
-    failureStage = 'deepseek';
-    comparison = localComparison(extracted, modelAnswer, maxScore);
-    comparison.feedback = `${comparison.feedback} سبب التنبيه: ${error instanceof Error ? error.message : 'تعذر الاتصال بـDeepSeek'}`.slice(0, 3000);
-  }
-
-  addActivity({ request_id: requestId, provider_slot: usedSlot, success: true, ...(failureStage ? { failure_stage: failureStage, error: 'تم استخدام المقارنة المحلية الاحتياطية.' } : {}), duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
+  addActivity({ request_id: requestId, provider_slot: usedSlot, success: true, duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
   return json({
     success: true,
     request_id: requestId,
     provider_slot: usedSlot,
-    failure_stage: failureStage,
-    result: {
-      ...comparison,
-      maxScore,
-      request_id: requestId,
-      ocr_provider: usedSlot,
-      comparison_engine: comparison.comparison_engine,
-    },
+    ocr_provider: usedSlot,
+    extracted_text: extracted,
+    attempts: ocrFailures.length + 1,
   }, 200, cors);
 }
 
@@ -519,7 +388,7 @@ export default {
 
     if (url.pathname === '/api/health') {
       const slots = getOcrSlots(env);
-      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), ocr_primary_route: env.OCR_PRIMARY_ROUTE || 'round-robin', deepseek_configured: Boolean(env.DEEPSEEK_API_KEY) }, 200, cors);
+      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), ocr_primary_route: env.OCR_PRIMARY_ROUTE || 'round-robin' }, 200, cors);
     }
 
     if (url.pathname === '/api/admin/activity' && request.method === 'GET') {
@@ -532,7 +401,7 @@ export default {
       const auth = await verifySupabaseToken(request, env);
       if (!auth.ok) return json({ success: false, failure_stage: 'authentication', error: 'تسجيل الدخول مطلوب.' }, 401, cors);
       const slots = getOcrSlots(env);
-      return json({ success: true, service: 'C-OCR', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), deepseek_configured: Boolean(env.DEEPSEEK_API_KEY), recent_requests: activity.length }, 200, cors);
+      return json({ success: true, service: 'C-OCR', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), recent_requests: activity.length }, 200, cors);
     }
 
     if ((url.pathname === '/api/v1/ocr/process' || url.pathname === '/api/ocr/process') && request.method === 'POST') {

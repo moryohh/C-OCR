@@ -429,8 +429,16 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
 
   const auth = await verifySupabaseToken(request, env);
   if (!auth.ok) {
-    addActivity({ request_id: requestId, provider_slot: 'none', success: false, failure_stage: 'authentication', error: 'جلسة المستخدم غير صالحة', duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
-    return json({ success: false, request_id: requestId, failure_stage: 'authentication', error: 'يجب تسجيل الدخول قبل إرسال صورة OCR.' }, 401, cors);
+    const hasAuthorizationHeader = request.headers.get('Authorization')?.startsWith('Bearer ') === true;
+    const authCode = hasAuthorizationHeader ? 'AUTH_TOKEN_INVALID' : 'AUTH_TOKEN_MISSING';
+    addActivity({ request_id: requestId, provider_slot: 'none', success: false, failure_stage: 'authentication', error: authCode, duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
+    return json({
+      success: false,
+      request_id: requestId,
+      failure_stage: 'authentication',
+      code: authCode,
+      error: hasAuthorizationHeader ? 'رفض C-OCR رمز جلسة الحساب.' : 'لم يصل رمز جلسة الحساب إلى C-OCR.',
+    }, 401, cors);
   }
 
   const imageBase64 = sanitizeText(body?.imageBase64 || body?.image_base64 || body?.base64Image, 12_000_000);
@@ -511,7 +519,7 @@ export default {
 
     if (url.pathname === '/api/health') {
       const slots = getOcrSlots(env);
-      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), deepseek_configured: Boolean(env.DEEPSEEK_API_KEY) }, 200, cors);
+      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), ocr_primary_route: env.OCR_PRIMARY_ROUTE || 'round-robin', deepseek_configured: Boolean(env.DEEPSEEK_API_KEY) }, 200, cors);
     }
 
     if (url.pathname === '/api/admin/activity' && request.method === 'GET') {

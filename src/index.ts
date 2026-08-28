@@ -13,6 +13,7 @@ interface Env {
   AUTH_SUPABASE_A_ANON_KEY?: string;
   ALLOWED_ORIGINS?: string;
   OCR_DAILY_LIMIT?: string;
+  OCR_PRIMARY_ROUTE?: string;
 }
 
 type FailureStage = 'validation' | 'authentication' | 'proxy' | 'ocr' | 'deepseek' | 'comparison' | 'configuration';
@@ -447,7 +448,11 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
     return json({ success: false, request_id: requestId, failure_stage: 'configuration', error: 'لم يتم إعداد مسار OCR في موقع C.' }, 503, cors);
   }
 
-  const startIndex = roundRobinCursor % slots.length;
+  const preferredRoute = (env.OCR_PRIMARY_ROUTE || '').trim().toLowerCase();
+  const preferredIndex = preferredRoute
+    ? slots.findIndex((slot) => slot.kind === preferredRoute || slot.id === preferredRoute || slot.id.includes(preferredRoute))
+    : -1;
+  const startIndex = preferredIndex >= 0 ? preferredIndex : roundRobinCursor % slots.length;
   roundRobinCursor = (roundRobinCursor + 1) % slots.length;
   let extracted = '';
   let usedSlot = slots[0].id;

@@ -11,7 +11,6 @@ interface Env {
   AUTH_SUPABASE_A_ANON_KEY?: string;
   ALLOWED_ORIGINS?: string;
   OCR_DAILY_LIMIT?: string;
-  OCR_PRIMARY_ROUTE?: string;
 }
 
 type FailureStage = 'validation' | 'authentication' | 'proxy' | 'ocr' | 'configuration';
@@ -340,11 +339,9 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
     return json({ success: false, request_id: requestId, failure_stage: 'configuration', error: 'لم يتم إعداد مسار OCR في موقع C.' }, 503, cors);
   }
 
-  const preferredRoute = (env.OCR_PRIMARY_ROUTE || '').trim().toLowerCase();
-  const preferredIndex = preferredRoute
-    ? slots.findIndex((slot) => slot.kind === preferredRoute || slot.id === preferredRoute || slot.id.includes(preferredRoute))
-    : -1;
-  const startIndex = preferredIndex >= 0 ? preferredIndex : roundRobinCursor % slots.length;
+  // Choose the starting provider by round-robin. The other provider is only
+  // attempted for this request when the selected provider fails.
+  const startIndex = roundRobinCursor % slots.length;
   roundRobinCursor = (roundRobinCursor + 1) % slots.length;
   let extracted = '';
   let usedSlot = slots[0].id;
@@ -363,7 +360,7 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
       ocrFailures.push({ provider_slot: usedSlot, reason });
       if (offset === slots.length - 1) {
         addActivity({ request_id: requestId, provider_slot: usedSlot, success: false, failure_stage: 'ocr', error: reason, duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
-        return json({ success: false, request_id: requestId, provider_slot: usedSlot, failure_stage: 'ocr', error: 'فشل استخراج النص من مسارات OCR المتاحة.', failure_reasons: ocrFailures, attempts: slots.length }, 502, cors);
+        return json({ success: false, request_id: requestId, selected_provider_slot: slots[startIndex].id, provider_slot: usedSlot, failure_stage: 'ocr', error: 'فشل استخراج النص من مسارات OCR المتاحة.', failure_reasons: ocrFailures, attempts: slots.length }, 502, cors);
       }
     }
   }
@@ -372,10 +369,12 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
   return json({
     success: true,
     request_id: requestId,
+    selected_provider_slot: slots[startIndex].id,
     provider_slot: usedSlot,
     ocr_provider: usedSlot,
     extracted_text: extracted,
     attempts: ocrFailures.length + 1,
+    distribution: 'round_robin',
   }, 200, cors);
 }
 
@@ -388,7 +387,7 @@ export default {
 
     if (url.pathname === '/api/health') {
       const slots = getOcrSlots(env);
-      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), ocr_primary_route: env.OCR_PRIMARY_ROUTE || 'round-robin' }, 200, cors);
+      return json({ success: true, service: 'C-OCR', status: 'ready', configured_ocr_slots: slots.length, ocr_routes: slots.map((slot) => slot.id), ocr_distribution: 'round_robin' }, 200, cors);
     }
 
     if (url.pathname === '/api/admin/activity' && request.method === 'GET') {

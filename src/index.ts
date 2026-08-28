@@ -13,12 +13,9 @@ interface Env {
   AUTH_SUPABASE_A_ANON_KEY?: string;
   ALLOWED_ORIGINS?: string;
   OCR_DAILY_LIMIT?: string;
-<<<<<<< HEAD
   OCR_PRIMARY_ROUTE?: string;
-=======
   GUEST_TEST_ENABLED?: string;
   GUEST_TEST_DAILY_LIMIT?: string;
->>>>>>> parent of ca13be6 (Reapply "Remove temporary guest OCR path")
 }
 
 type FailureStage = 'validation' | 'authentication' | 'proxy' | 'ocr' | 'deepseek' | 'comparison' | 'configuration';

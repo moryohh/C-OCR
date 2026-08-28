@@ -21,6 +21,7 @@
 ```text
 OCR_API_KEY_1
 OCR_RELAY_TOKEN
+DEEPSEEK_API_KEY
 AUTH_SUPABASE_A_URL
 AUTH_SUPABASE_A_ANON_KEY
 ```
@@ -72,7 +73,7 @@ CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 ```
 
-يُفضل أن يكون رمز Cloudflare محدود الصلاحية إلى Workers Scripts: Edit للحساب المحدد فقط. بعد النشر، أضف `OCR_API_KEY_1` و`OCR_RELAY_TOKEN` من Cloudflare Dashboard، وليس من ملف GitHub.
+يُفضل أن يكون رمز Cloudflare محدود الصلاحية إلى Workers Scripts: Edit للحساب المحدد فقط. بعد النشر، أضف `OCR_API_KEY_1` و`OCR_RELAY_TOKEN` و`DEEPSEEK_API_KEY` من Cloudflare Dashboard، وليس من ملف GitHub.
 
 ## الواجهات
 

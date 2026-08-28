@@ -14,3 +14,6 @@ ALLOWED_ORIGINS = "https://moryohh.github.io,https://moryohh.github.io/A"
 OCR_DAILY_LIMIT = "500"
 OCR_RELAY_URL = "https://c-ocr.vercel.app/api/ocr"
 OCR_PRIMARY_ROUTE = "vercel"
+GUEST_TEST_ENABLED = "true"
+GUEST_TEST_DAILY_LIMIT = "10"
+

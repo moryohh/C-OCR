@@ -424,7 +424,7 @@ function normalizeGeminiResult(payload: any, maxScore: number): EvaluationResult
 
 async function callGeminiSlot(slot: GeminiSlot, imageBase64: string, question: string, modelAnswer: string, maxScore: number, requestId: string, body: any, env: Env): Promise<EvaluationResult> {
   const form = new FormData();
-  const payloadBlob = new Blob([JSON.stringify({
+  form.append('payload', JSON.stringify({
     question,
     modelAnswer,
     maxScore,
@@ -432,8 +432,7 @@ async function callGeminiSlot(slot: GeminiSlot, imageBase64: string, question: s
     source: sanitizeText(body?.source, 40),
     subject: sanitizeText(body?.subject, 120),
     lesson: sanitizeText(body?.lesson || body?.lessonTitle, 240),
-  })], { type: 'application/json' });
-  form.append('payload', payloadBlob, 'payload.json');
+  }));
   form.append('image', base64ToBlob(imageBase64), 'student-answer.jpg');
   const controller = new AbortController();
   const timeoutMs = Math.max(5_000, Math.min(60_000, Number(env.GEMINI_TIMEOUT_MS) || 45_000));

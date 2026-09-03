@@ -17,3 +17,10 @@ GEMINI_API_1_URL = "https://hhh-main-wheat.vercel.app/api/ocr"
 GEMINI_API_2_URL = "https://hhh-two-black.vercel.app/api/ocr"
 GEMINI_TIMEOUT_MS = "45000"
 
+[durable_objects]
+bindings = [{ name = "ROUND_ROBIN", class_name = "RoundRobinCounter" }]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RoundRobinCounter"]
+

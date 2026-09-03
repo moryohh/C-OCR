@@ -16,6 +16,7 @@ interface Env {
   GEMINI_API_1_URL?: string;
   GEMINI_API_2_URL?: string;
   GEMINI_TIMEOUT_MS?: string;
+  ROUND_ROBIN?: DurableObjectNamespace;
 }
 
 type FailureStage = 'validation' | 'authentication' | 'proxy' | 'ocr' | 'deepseek' | 'comparison' | 'configuration';
@@ -214,6 +215,19 @@ type OcrSlot = {
 type GeminiSlot = { id: string; url: string };
 
 let geminiRoundRobinCursor = 0;
+
+async function getNextGeminiIndex(env: Env, slotCount: number): Promise<number> {
+  if (slotCount <= 1) return 0;
+  if (env.ROUND_ROBIN) {
+    const id = env.ROUND_ROBIN.idFromName('gemini-primary');
+    const response = await env.ROUND_ROBIN.get(id).fetch('https://round-robin/next');
+    const value = Number(await response.text());
+    if (Number.isInteger(value) && value >= 0) return value % slotCount;
+  }
+  const fallback = geminiRoundRobinCursor % slotCount;
+  geminiRoundRobinCursor = (geminiRoundRobinCursor + 1) % slotCount;
+  return fallback;
+}
 
 function getGeminiSlots(env: Env): GeminiSlot[] {
   const slots: GeminiSlot[] = [];
@@ -495,8 +509,7 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
   // Gemini is the primary full-image evaluator. Requests alternate between
   // the configured endpoints; each endpoint is attempted at most once.
   if (geminiSlots.length) {
-    const startIndex = geminiRoundRobinCursor % geminiSlots.length;
-    geminiRoundRobinCursor = (geminiRoundRobinCursor + 1) % geminiSlots.length;
+    const startIndex = await getNextGeminiIndex(env, geminiSlots.length);
     for (let offset = 0; offset < geminiSlots.length; offset += 1) {
       const index = (startIndex + offset) % geminiSlots.length;
       const slot = geminiSlots[index];
@@ -593,6 +606,21 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
     attempts: ocrFailures.length + 1,
     distribution: 'round_robin',
   }, 200, cors);
+}
+
+export class RoundRobinCounter {
+  private state: DurableObjectState;
+
+  constructor(state: DurableObjectState) {
+    this.state = state;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname !== '/next') return new Response('Not found', { status: 404 });
+    const current = (await this.state.storage.get<number>('cursor')) || 0;
+    await this.state.storage.put('cursor', (current + 1) % 2);
+    return new Response(String(current));
+  }
 }
 
 export default {

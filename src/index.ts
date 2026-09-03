@@ -13,6 +13,9 @@ interface Env {
   OCR_DAILY_LIMIT?: string;
   DEEPSEEK_API_KEY?: string;
   DEEPSEEK_MODEL?: string;
+  GEMINI_API_1_URL?: string;
+  GEMINI_API_2_URL?: string;
+  GEMINI_TIMEOUT_MS?: string;
 }
 
 type FailureStage = 'validation' | 'authentication' | 'proxy' | 'ocr' | 'deepseek' | 'comparison' | 'configuration';
@@ -37,7 +40,7 @@ type EvaluationResult = {
   identifiedTextOrSteps: string[];
   strengths: string[];
   recommendations: string[];
-  comparison_engine: 'deepseek';
+  comparison_engine: 'deepseek' | 'gemini';
   extracted_text: string;
 };
 
@@ -208,6 +211,19 @@ type OcrSlot = {
   key?: string;
 };
 
+type GeminiSlot = { id: string; url: string };
+
+let geminiRoundRobinCursor = 0;
+
+function getGeminiSlots(env: Env): GeminiSlot[] {
+  const slots: GeminiSlot[] = [];
+  const first = sanitizeText(env.GEMINI_API_1_URL, 500);
+  const second = sanitizeText(env.GEMINI_API_2_URL, 500);
+  if (first) slots.push({ id: 'gemini-1', url: first });
+  if (second) slots.push({ id: 'gemini-2', url: second });
+  return slots;
+}
+
 function getOcrSlots(env: Env): OcrSlot[] {
   const slots: OcrSlot[] = [];
   const firstKey = (env.OCR_API_KEY_1 || '').trim();
@@ -367,6 +383,76 @@ async function compareWithDeepSeek(extracted: string, question: string, modelAns
   };
 }
 
+function base64ToBlob(value: string): Blob {
+  const normalized = normalizeBase64(value);
+  const match = normalized.match(/^data:([^;]+);base64,(.*)$/s);
+  const mime = match?.[1] || 'image/jpeg';
+  const encoded = match?.[2] || normalized;
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: mime });
+}
+
+function normalizeGeminiResult(payload: any, maxScore: number): EvaluationResult {
+  const result = payload?.result || payload;
+  const extractedText = sanitizeText(result?.extractedText || result?.extracted_text || result?.studentAnswer || result?.student_answer, 40_000);
+  const rawScore = Number(result?.score);
+  const score = Number.isFinite(rawScore) ? Math.max(0, Math.min(maxScore, Math.round(rawScore))) : 0;
+  const suppliedPercentage = Number(result?.percentage ?? result?.similarity_score);
+  const percentage = Number.isFinite(suppliedPercentage)
+    ? Math.max(0, Math.min(100, Math.round(suppliedPercentage)))
+    : Math.round((score / maxScore) * 100);
+  const list = (value: unknown): string[] => Array.isArray(value)
+    ? value.map((item) => sanitizeText(item, 500)).filter(Boolean).slice(0, 20)
+    : [];
+  const pageResults = Array.isArray(payload?.pages)
+    ? payload.pages.map((page: any) => sanitizeText(page?.result, 2000)).filter(Boolean).join('\\n')
+    : '';
+  return {
+    score,
+    max_score: maxScore,
+    percentage,
+    feedback: sanitizeText(result?.feedback, 3000) || pageResults || 'تمت معالجة الصورة عبر Gemini.',
+    identifiedTextOrSteps: list(result?.identifiedTextOrSteps || result?.steps || (extractedText ? [extractedText] : pageResults ? [pageResults] : [])),
+    strengths: list(result?.strengths),
+    recommendations: list(result?.recommendations),
+    comparison_engine: 'gemini',
+    extracted_text: extractedText || pageResults,
+  };
+}
+
+async function callGeminiSlot(slot: GeminiSlot, imageBase64: string, question: string, modelAnswer: string, maxScore: number, requestId: string, body: any, env: Env): Promise<EvaluationResult> {
+  const form = new FormData();
+  const payloadBlob = new Blob([JSON.stringify({
+    question,
+    modelAnswer,
+    maxScore,
+    request_id: requestId,
+    source: sanitizeText(body?.source, 40),
+    subject: sanitizeText(body?.subject, 120),
+    lesson: sanitizeText(body?.lesson || body?.lessonTitle, 240),
+  })], { type: 'application/json' });
+  form.append('payload', payloadBlob, 'payload.json');
+  form.append('image', base64ToBlob(imageBase64), 'student-answer.jpg');
+  const controller = new AbortController();
+  const timeoutMs = Math.max(5_000, Math.min(60_000, Number(env.GEMINI_TIMEOUT_MS) || 45_000));
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(slot.url, { method: 'POST', body: form, signal: controller.signal });
+    const payload = await response.json().catch(() => ({})) as Record<string, any>;
+    if (!response.ok || payload?.ok === false || payload?.success === false) {
+      throw new Error(`gemini_http_${response.status}`);
+    }
+    return normalizeGeminiResult(payload, maxScore);
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw new Error('gemini_timeout');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function processOcr(request: Request, env: Env): Promise<Response> {
   const startedAt = Date.now();
   const requestOrigin = request.headers.get('Origin')?.replace(/\/$/, '') || '';
@@ -403,19 +489,52 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
   if (!imageBase64) return json({ success: false, request_id: requestId, failure_stage: 'validation', error: 'صورة الإجابة مطلوبة.' }, 400, cors);
   if (imageBase64.length > 12_000_000) return json({ success: false, request_id: requestId, failure_stage: 'validation', error: 'حجم الصورة أكبر من الحد المسموح.' }, 413, cors);
 
+  const geminiSlots = getGeminiSlots(env);
   const slots = getOcrSlots(env);
-  if (!slots.length) {
-    addActivity({ request_id: requestId, provider_slot: 'none', success: false, failure_stage: 'configuration', error: 'لم يتم ضبط مسارات OCR', duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
-    return json({ success: false, request_id: requestId, failure_stage: 'configuration', error: 'لم يتم إعداد مسار OCR في موقع C.' }, 503, cors);
+  const geminiFailures: Array<{ provider_slot: string; reason: string }> = [];
+
+  // Gemini is the primary full-image evaluator. Requests alternate between
+  // the configured endpoints; each endpoint is attempted at most once.
+  if (geminiSlots.length) {
+    const startIndex = geminiRoundRobinCursor % geminiSlots.length;
+    geminiRoundRobinCursor = (geminiRoundRobinCursor + 1) % geminiSlots.length;
+    for (let offset = 0; offset < geminiSlots.length; offset += 1) {
+      const index = (startIndex + offset) % geminiSlots.length;
+      const slot = geminiSlots[index];
+      try {
+        const evaluation = await callGeminiSlot(slot, imageBase64, question, modelAnswer, maxScore, requestId, body, env);
+        addActivity({ request_id: requestId, submission_id: submissionId, question_id: questionId, provider_slot: slot.id, success: true, duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
+        return json({
+          success: true,
+          request_id: requestId,
+          submission_id: submissionId,
+          question_id: questionId,
+          selected_provider_slot: geminiSlots[startIndex].id,
+          provider_slot: slot.id,
+          ocr_provider: slot.id,
+          extracted_text: evaluation.extracted_text,
+          result: evaluation,
+          attempts: offset + 1,
+          distribution: 'round_robin_gemini',
+        }, 200, cors);
+      } catch (error) {
+        geminiFailures.push({ provider_slot: slot.id, reason: sanitizeOcrFailure(error instanceof Error ? error.message : 'فشل Gemini') });
+      }
+    }
   }
 
-  // Choose the starting provider by round-robin. The other provider is only
+  if (!slots.length) {
+    addActivity({ request_id: requestId, provider_slot: geminiFailures.length ? 'gemini-exhausted' : 'none', success: false, failure_stage: 'configuration', error: 'لم يتم ضبط مسارات المعالجة الاحتياطية', duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
+    return json({ success: false, request_id: requestId, failure_stage: 'configuration', failure_reasons: geminiFailures, error: 'تعذر تشغيل مسارات المعالجة ولم يتم إعداد مسار احتياطي في موقع C.' }, 503, cors);
+  }
+
+  // Choose the starting legacy OCR provider by round-robin. The other provider is only
   // attempted for this request when the selected provider fails.
   const startIndex = roundRobinCursor % slots.length;
   roundRobinCursor = (roundRobinCursor + 1) % slots.length;
   let extracted = '';
   let usedSlot = slots[0].id;
-  const ocrFailures: Array<{ provider_slot: string; reason: string }> = [];
+  const ocrFailures: Array<{ provider_slot: string; reason: string }> = [...geminiFailures];
 
   for (let offset = 0; offset < slots.length; offset += 1) {
     const index = (startIndex + offset) % slots.length;
@@ -430,7 +549,7 @@ async function processOcr(request: Request, env: Env): Promise<Response> {
       ocrFailures.push({ provider_slot: usedSlot, reason });
       if (offset === slots.length - 1) {
         addActivity({ request_id: requestId, provider_slot: usedSlot, success: false, failure_stage: 'ocr', error: reason, duration_ms: Date.now() - startedAt, created_at: new Date().toISOString() });
-        return json({ success: false, request_id: requestId, selected_provider_slot: slots[startIndex].id, provider_slot: usedSlot, failure_stage: 'ocr', error: 'فشل استخراج النص من مسارات OCR المتاحة.', failure_reasons: ocrFailures, attempts: slots.length }, 502, cors);
+        return json({ success: false, request_id: requestId, selected_provider_slot: slots[startIndex].id, provider_slot: usedSlot, failure_stage: 'ocr', error: 'فشل استخراج النص من المسارات الأساسية والاحتياطية المتاحة.', failure_reasons: ocrFailures, attempts: geminiFailures.length + slots.length }, 502, cors);
       }
     }
   }

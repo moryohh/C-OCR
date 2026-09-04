@@ -15,6 +15,8 @@ interface Env {
   DEEPSEEK_MODEL?: string;
   GEMINI_API_1_URL?: string;
   GEMINI_API_2_URL?: string;
+  GEMINI_API_3_URL?: string;
+  GEMINI_API_4_URL?: string;
   GEMINI_TIMEOUT_MS?: string;
   ROUND_ROBIN?: DurableObjectNamespace;
 }
@@ -220,7 +222,7 @@ async function getNextGeminiIndex(env: Env, slotCount: number): Promise<number> 
   if (slotCount <= 1) return 0;
   if (env.ROUND_ROBIN) {
     const id = env.ROUND_ROBIN.idFromName('gemini-primary');
-    const response = await env.ROUND_ROBIN.get(id).fetch('https://round-robin/next');
+    const response = await env.ROUND_ROBIN.get(id).fetch(`https://round-robin/next?count=${slotCount}`);
     const value = Number(await response.text());
     if (Number.isInteger(value) && value >= 0) return value % slotCount;
   }
@@ -233,8 +235,12 @@ function getGeminiSlots(env: Env): GeminiSlot[] {
   const slots: GeminiSlot[] = [];
   const first = sanitizeText(env.GEMINI_API_1_URL, 500);
   const second = sanitizeText(env.GEMINI_API_2_URL, 500);
+  const third = sanitizeText(env.GEMINI_API_3_URL, 500);
+  const fourth = sanitizeText(env.GEMINI_API_4_URL, 500);
   if (first) slots.push({ id: 'gemini-1', url: first });
   if (second) slots.push({ id: 'gemini-2', url: second });
+  if (third) slots.push({ id: 'gemini-3', url: third });
+  if (fourth) slots.push({ id: 'gemini-4', url: fourth });
   return slots;
 }
 
@@ -616,10 +622,13 @@ export class RoundRobinCounter {
   }
 
   async fetch(request: Request): Promise<Response> {
-    if (new URL(request.url).pathname !== '/next') return new Response('Not found', { status: 404 });
+    const url = new URL(request.url);
+    if (url.pathname !== '/next') return new Response('Not found', { status: 404 });
+    const count = Math.max(1, Math.min(32, Number(url.searchParams.get('count')) || 2));
     const current = (await this.state.storage.get<number>('cursor')) || 0;
-    await this.state.storage.put('cursor', (current + 1) % 2);
-    return new Response(String(current));
+    const selected = current % count;
+    await this.state.storage.put('cursor', (selected + 1) % count);
+    return new Response(String(selected));
   }
 }
 

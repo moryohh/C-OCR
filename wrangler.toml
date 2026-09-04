@@ -13,8 +13,10 @@ OCR_SPACE_ENDPOINT = "https://api.ocr.space/parse/image"
 ALLOWED_ORIGINS = "https://moryohh.github.io,https://moryohh.github.io/A"
 OCR_DAILY_LIMIT = "500"
 OCR_RELAY_URL = "https://c-ocr.vercel.app/api/ocr"
-GEMINI_API_1_URL = "https://hhh-main-wheat.vercel.app/api/ocr"
-GEMINI_API_2_URL = "https://hhh-two-black.vercel.app/api/ocr"
+GEMINI_API_1_URL = "https://hhh-two-black.vercel.app/api/ocr"
+GEMINI_API_2_URL = "https://hhh-main-wheat.vercel.app/api/ocr"
+GEMINI_API_3_URL = "https://superb-centaur-deea8c.netlify.app/api/friend-ocr"
+GEMINI_API_4_URL = "https://starlit-duckanoo-496fde.netlify.app/api/mmm-friend-ocr"
 GEMINI_TIMEOUT_MS = "45000"
 
 [durable_objects]

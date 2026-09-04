@@ -22,5 +22,5 @@ bindings = [{ name = "ROUND_ROBIN", class_name = "RoundRobinCounter" }]
 
 [[migrations]]
 tag = "v1"
-new_classes = ["RoundRobinCounter"]
+new_sqlite_classes = ["RoundRobinCounter"]
 

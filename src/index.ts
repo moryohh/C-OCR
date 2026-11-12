@@ -2,6 +2,12 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 
 interface Env {
   ASSETS: Fetcher;
+
+  // Recovery note:
+  // The four GEMINI_API_* URLs and all application code are recoverable from GitHub.
+  // OCR_API_KEY_1, DEEPSEEK_API_KEY, OCR_RELAY_TOKEN and OCR_SHARED_SECRET are secrets:
+  // never commit them, never delete their dependent features, and create replacement
+  // values in the new host when the previous Cloudflare account cannot be recovered.
   OCR_SPACE_ENDPOINT: string;
   OCR_API_KEY_1?: string;
   OCR_API_KEY_2?: string;

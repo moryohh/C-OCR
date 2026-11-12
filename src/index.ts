@@ -7,6 +7,7 @@ interface Env {
   OCR_API_KEY_2?: string;
   OCR_RELAY_URL?: string;
   OCR_RELAY_TOKEN?: string;
+  OCR_SHARED_SECRET?: string;
   AUTH_SUPABASE_A_URL?: string;
   AUTH_SUPABASE_A_ANON_KEY?: string;
   ALLOWED_ORIGINS?: string;
@@ -83,6 +84,26 @@ function corsHeaders(request: Request, env: Env): HeadersInit {
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token, X-Secure-File-Name',
     'Access-Control-Max-Age': '600',
   };
+}
+
+async function hasValidGatewaySecret(request: Request, env: Env): Promise<boolean> {
+  const configured = (env.OCR_SHARED_SECRET || '').trim();
+  const provided = (request.headers.get('X-OCR-Shared-Secret') || '').trim();
+  if (!configured || !provided) return false;
+
+  // Compare fixed-length digests so the Worker does not leak how much of the secret matched.
+  const encoder = new TextEncoder();
+  const [expectedDigest, providedDigest] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(configured)),
+    crypto.subtle.digest('SHA-256', encoder.encode(provided)),
+  ]);
+  const expected = new Uint8Array(expectedDigest);
+  const actual = new Uint8Array(providedDigest);
+  let difference = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    difference |= expected[index] ^ actual[index];
+  }
+  return difference === 0;
 }
 
 function getClientFingerprint(request: Request): string {
@@ -658,6 +679,10 @@ export default {
     }
 
     if ((url.pathname === '/api/v1/ocr/process' || url.pathname === '/api/ocr/process') && request.method === 'POST') {
+      // Only Project A's Worker may call the expensive OCR/evaluation pipeline.
+      if (!(await hasValidGatewaySecret(request, env))) {
+        return json({ success: false, failure_stage: 'authentication', error: 'بوابة التصحيح غير مخولة.' }, 401, cors);
+      }
       return processOcr(request, env);
     }
 
